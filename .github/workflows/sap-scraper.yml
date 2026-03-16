@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       days_back:
-        description: 'Number of days to look back.'
+        description: 'Number of days to look back'
         required: false
         default: '7'
       max_candidates:
@@ -62,6 +62,13 @@ jobs:
         SAP_USER_EMAIL: ${{ secrets.SAP_USER_EMAIL }}
         SAP_PASSWORD: ${{ secrets.SAP_PASSWORD }}
         SAP_MAX_CANDIDATES: ${{ github.event.inputs.max_candidates || '' }}
+        DB_HOST: ${{ secrets.DB_HOST }}
+        DB_PORT: ${{ secrets.DB_PORT }}
+        DB_NAME: ${{ secrets.DB_NAME }}
+        DB_USER: ${{ secrets.DB_USER }}
+        DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        DB_TABLE: ${{ secrets.DB_TABLE }}
+        AUDIT_USERNAME: ${{ secrets.AUDIT_USERNAME }}
         DISPLAY: ':99'
       run: |
         # Start Xvfb (virtual display)
@@ -96,5 +103,4 @@ jobs:
       if: failure()
       run: |
         echo "Scraper failed! Check the logs."
-        
         # You can add Slack/email notification here
