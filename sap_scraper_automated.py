@@ -36,14 +36,23 @@ class SAPCDPScraper:
         options.add_argument('--start-maximized')
         options.add_argument('--disable-save-password-bubble')
 
+        # Additional arguments to prevent password manager dialog
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-password-generation')
+        options.add_argument('--disable-password-manager-reauthentication')
+        options.add_argument('--no-first-run')
+        options.add_argument('--no-service-autorun')
+        options.add_argument('--password-store=basic')
+
         # Disable password manager
         prefs = {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False,
             "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_setting_values.automatic_downloads": 1,
         }
         options.add_experimental_option("prefs", prefs)
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option('useAutomationExtension', False)
 
         self.driver = webdriver.Chrome(options=options)
@@ -300,7 +309,8 @@ class SAPCDPScraper:
                 email = self.driver.find_element(By.XPATH,
                     "//div[@id[contains(., 'emailAddress')]]//span[contains(@id, '__text')]").text
                 candidate_info['Email'] = email
-            except:
+            except Exception as e:
+                logging.debug(f"Could not extract email: {e}")
                 candidate_info['Email'] = ""
 
             # Phone
@@ -326,6 +336,14 @@ class SAPCDPScraper:
                 candidate_info['Rights_Expire'] = expire
             except:
                 candidate_info['Rights_Expire'] = ""
+
+            # Company
+            try:
+                company = self.driver.find_element(By.XPATH,
+                    "//div[@id[contains(., 'currentCompany')]]//span[contains(@id, '__text')] | //div[@id[contains(., 'company')]]//span[contains(@id, '__text')]").text
+                candidate_info['Company'] = company
+            except:
+                candidate_info['Company'] = ""
 
             # Job applications
             job_applications = []
