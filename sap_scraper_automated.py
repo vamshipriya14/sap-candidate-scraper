@@ -478,7 +478,7 @@ def main():
     # ===================================================================
     # CONFIGURATION
     # ===================================================================
-    DB_INSERT = False  # Set to True to enable database insertion
+    DB_INSERT = True  # Set to True to enable database insertion
     INCREMENTAL_MODE = True  # Set to True to skip existing candidates
     # ===================================================================
 
