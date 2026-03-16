@@ -401,8 +401,6 @@ def normalize_date(date_str):
     if not date_str or not isinstance(date_str, str):
         return None
 
-    from datetime import datetime
-
     try:
         # Try parsing common formats
         formats = [
@@ -478,7 +476,7 @@ def main():
     # ===================================================================
     # CONFIGURATION
     # ===================================================================
-    DB_INSERT = True  # Set to True to enable database insertion
+    DB_INSERT = False  # Set to True to enable database insertion
     INCREMENTAL_MODE = True  # Set to True to skip existing candidates
     # ===================================================================
 
@@ -635,7 +633,6 @@ def main():
                                     placeholders.append('%s')
 
                         # Add audit fields (following hr-email-automation pattern)
-                        from datetime import datetime
                         audit_time = datetime.now()
 
                         fields.extend(['created_by', 'created_date', 'modified_by', 'modified_date'])
