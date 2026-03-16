@@ -127,50 +127,56 @@ class SAPCDPScraper:
 
         time.sleep(2)
 
-        # Click Candidates tab
+        # Navigate to Candidates tab using SAP UI5 API
         logging.info("Navigating to Candidates page...")
 
         time.sleep(2)
 
-        # Try multiple methods to click Candidates tab
-        clicked = False
-
-        # Method 1: Click the anchor/link containing "Candidates"
+        # Method 1: Use SAP UI5 API to switch tabs (most reliable)
         try:
-            candidates_link = self.driver.find_element(By.XPATH, "//a[.//span[text()='Candidates']]")
-            self.driver.execute_script("arguments[0].click();", candidates_link)
-            time.sleep(3)
-            clicked = True
-            logging.info("Method 1: Clicked Candidates link")
-        except:
-            pass
+            switch_script = """
+            // Find and click Candidates tab using SAP UI5
+            var iconTabBar = sap.ui.getCore().byId('__bar0');
+            if (!iconTabBar) {
+                // Try to find any IconTabBar
+                var allControls = sap.ui.getCore().getUIArea('__area0').getContent();
+                for (var i = 0; i < allControls.length; i++) {
+                    var control = allControls[i];
+                    if (control.getMetadata().getName().includes('IconTabBar')) {
+                        iconTabBar = control;
+                        break;
+                    }
+                }
+            }
 
-        # Method 2: Find parent li/div element and click it
-        if not clicked:
-            try:
-                candidates_tab = self.driver.find_element(By.XPATH,
-                    "//span[text()='Candidates']/ancestor::*[contains(@class, 'Tab') or contains(@class, 'tab') or self::li][1]")
-                self.driver.execute_script("arguments[0].click();", candidates_tab)
-                time.sleep(3)
-                clicked = True
-                logging.info("Method 2: Clicked Candidates tab parent")
-            except:
-                pass
+            if (iconTabBar) {
+                var items = iconTabBar.getItems();
+                for (var i = 0; i < items.length; i++) {
+                    var item = items[i];
+                    if (item.getText && item.getText() === 'Candidates') {
+                        iconTabBar.setSelectedItem(item);
+                        iconTabBar.fireSelect({item: item, key: item.getKey()});
+                        return 'SUCCESS: Switched to Candidates tab';
+                    }
+                }
+            }
+            return 'ERROR: Could not find Candidates tab';
+            """
+            result = self.driver.execute_script(switch_script)
+            logging.info(f"SAP UI5 method: {result}")
+            time.sleep(5)
+        except Exception as e:
+            logging.error(f"SAP UI5 method failed: {e}")
 
-        # Method 3: Just click the span as fallback
-        if not clicked:
+            # Fallback: Direct click on Candidates span
             try:
                 candidates_span = self.driver.find_element(By.XPATH, "//span[text()='Candidates']")
                 self.driver.execute_script("arguments[0].click();", candidates_span)
-                time.sleep(3)
-                clicked = True
-                logging.info("Method 3: Clicked Candidates span")
-            except Exception as e:
-                logging.error(f"All methods failed to click Candidates tab: {e}")
-                self.driver.save_screenshot('candidates_tab_click_failed.png')
-
-        # Wait for page to update
-        time.sleep(3)
+                time.sleep(5)
+                logging.info("Fallback: Clicked Candidates span")
+            except Exception as e2:
+                logging.error(f"All methods failed: {e2}")
+                self.driver.save_screenshot('navigation_failed.png')
 
         logging.info("✓ Ready to extract candidates!")
 
