@@ -130,25 +130,49 @@ class SAPCDPScraper:
         # Click Candidates tab
         logging.info("Navigating to Candidates page...")
 
-        # Wait for Candidates tab to be clickable
-        candidates_tab = self.wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//span[text()='Candidates']")))
+        time.sleep(2)
 
-        # Click using JavaScript to ensure it works in headless mode
-        self.driver.execute_script("arguments[0].click();", candidates_tab)
+        # Try multiple methods to click Candidates tab
+        clicked = False
 
-        # Wait for candidates list to load
-        time.sleep(5)
-
-        # Verify we're on Candidates page by checking for candidate list
+        # Method 1: Click the anchor/link containing "Candidates"
         try:
-            self.wait.until(EC.presence_of_element_located(
-                (By.XPATH, "//table[contains(@id, 'candidateList')] | //div[contains(@id, 'candidateList')]")))
-            logging.info("✓ Ready to extract candidates!")
+            candidates_link = self.driver.find_element(By.XPATH, "//a[.//span[text()='Candidates']]")
+            self.driver.execute_script("arguments[0].click();", candidates_link)
+            time.sleep(3)
+            clicked = True
+            logging.info("Method 1: Clicked Candidates link")
         except:
-            logging.error("❌ Failed to navigate to Candidates page!")
-            self.driver.save_screenshot('navigation_failed.png')
-            raise Exception("Could not navigate to Candidates page")
+            pass
+
+        # Method 2: Find parent li/div element and click it
+        if not clicked:
+            try:
+                candidates_tab = self.driver.find_element(By.XPATH,
+                    "//span[text()='Candidates']/ancestor::*[contains(@class, 'Tab') or contains(@class, 'tab') or self::li][1]")
+                self.driver.execute_script("arguments[0].click();", candidates_tab)
+                time.sleep(3)
+                clicked = True
+                logging.info("Method 2: Clicked Candidates tab parent")
+            except:
+                pass
+
+        # Method 3: Just click the span as fallback
+        if not clicked:
+            try:
+                candidates_span = self.driver.find_element(By.XPATH, "//span[text()='Candidates']")
+                self.driver.execute_script("arguments[0].click();", candidates_span)
+                time.sleep(3)
+                clicked = True
+                logging.info("Method 3: Clicked Candidates span")
+            except Exception as e:
+                logging.error(f"All methods failed to click Candidates tab: {e}")
+                self.driver.save_screenshot('candidates_tab_click_failed.png')
+
+        # Wait for page to update
+        time.sleep(3)
+
+        logging.info("✓ Ready to extract candidates!")
 
         time.sleep(2)
 
