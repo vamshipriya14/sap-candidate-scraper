@@ -96,4 +96,5 @@ jobs:
       if: failure()
       run: |
         echo "Scraper failed! Check the logs."
+        
         # You can add Slack/email notification here
