@@ -251,7 +251,16 @@ class SAPCDPScraper:
                 except:
                     self.driver.execute_script("arguments[0].click();", candidate)
 
-                time.sleep(0.5)
+                # Wait longer for detail panel to load (GitHub Actions needs more time)
+                time.sleep(3)
+
+                # Save screenshot for first candidate (debugging)
+                if idx == 1:
+                    try:
+                        self.driver.save_screenshot(f'candidate_detail_{idx}.png')
+                        logging.info(f"Saved screenshot: candidate_detail_{idx}.png")
+                    except:
+                        pass
 
                 # Extract details
                 candidate_data = self.extract_candidate_details()
