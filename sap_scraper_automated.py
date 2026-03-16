@@ -98,28 +98,58 @@ class SAPCDPScraper:
         time.sleep(5)
 
         logging.info("✓ Login completed")
-        time.sleep(2)  # Wait for any dialogs to potentially appear
+        time.sleep(3)  # Wait for any dialogs to appear
 
-        # Try to dismiss any password dialogs (may or may not appear)
-        try:
-            # Press Escape key to dismiss dialogs
-            from selenium.webdriver.common.keys import Keys
-            self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
-            time.sleep(1)
-        except:
-            pass
+        # Aggressively dismiss password manager dialogs
+        from selenium.webdriver.common.keys import Keys
+
+        # Try multiple dismissal methods
+        for attempt in range(3):
+            try:
+                # Method 1: Press Escape key multiple times
+                self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+                time.sleep(0.5)
+            except:
+                pass
+
+            try:
+                # Method 2: Look for and click any visible OK/Close buttons
+                ok_buttons = self.driver.find_elements(By.XPATH,
+                    "//button[contains(text(), 'OK')] | //button[contains(text(), 'Close')] | //button[@aria-label='Close']")
+                for btn in ok_buttons:
+                    if btn.is_displayed():
+                        btn.click()
+                        logging.info("Dismissed dialog by clicking button")
+                        time.sleep(1)
+                        break
+            except:
+                pass
+
+        time.sleep(2)
 
         # Click Candidates tab
         logging.info("Navigating to Candidates page...")
-        try:
-            candidates_tab = self.driver.find_element(By.XPATH, "//span[text()='Candidates']")
-            candidates_tab.click()
-        except:
-            self.driver.execute_script("arguments[0].click();",
-                self.driver.find_element(By.XPATH, "//span[text()='Candidates']"))
-        time.sleep(3)
 
-        logging.info("✓ Ready to extract candidates!")
+        # Wait for Candidates tab to be clickable
+        candidates_tab = self.wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//span[text()='Candidates']")))
+
+        # Click using JavaScript to ensure it works in headless mode
+        self.driver.execute_script("arguments[0].click();", candidates_tab)
+
+        # Wait for candidates list to load
+        time.sleep(5)
+
+        # Verify we're on Candidates page by checking for candidate list
+        try:
+            self.wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//table[contains(@id, 'candidateList')] | //div[contains(@id, 'candidateList')]")))
+            logging.info("✓ Ready to extract candidates!")
+        except:
+            logging.error("❌ Failed to navigate to Candidates page!")
+            self.driver.save_screenshot('navigation_failed.png')
+            raise Exception("Could not navigate to Candidates page")
+
         time.sleep(2)
 
     def get_network_responses(self):
