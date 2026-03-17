@@ -1,782 +1,625 @@
 """
-SAP Scraper - Automated Version (Based on Working CDP Interceptor)
-Fully automated with no manual intervention
+SAP CDP Scraper - FINAL (Stable Extraction + Supabase Sync)
 """
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import StaleElementReferenceException
+
+from supabase import create_client
+from dotenv import load_dotenv
+
 import pandas as pd
 import time
 from datetime import datetime
+from dateutil import parser
 import logging
-import tempfile
 import os
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
-# Setup logging
+# ================== LOAD ENV ==================
+load_dotenv(dotenv_path=r"C:\Users\Abcom\volibits\sap-candidate-scraper\.env")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise Exception("Supabase credentials missing")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ================== LOGGING ==================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('cdp_scraper.log'),
-        logging.StreamHandler()
+        logging.FileHandler('cdp_scraper.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
-def create_driver():
-    options = Options()
-
-    # =========================
-    # HEADLESS (GitHub Actions)
-    # =========================
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-
-    # =========================
-    # CLEAN PROFILE (IMPORTANT)
-    # =========================
-    temp_profile = tempfile.mkdtemp()
-    options.add_argument(f"--user-data-dir={temp_profile}")
-
-    # =========================
-    # DISABLE PASSWORD FEATURES
-    # =========================
-    options.add_argument("--disable-features=PasswordLeakDetection,PasswordManagerOnboarding")
-
-    prefs = {
-        "credentials_enable_service": False,
-        "profile.password_manager_enabled": False,
-        "profile.password_manager_leak_detection": False,
-    }
-
-    options.add_experimental_option("prefs", prefs)
-
-    # =========================
-    # OTHER STABILITY FLAGS
-    # =========================
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-
-    # =========================
-    # CREATE DRIVER
-    # =========================
-    driver = webdriver.Chrome(options=options)
-
-    # Hide automation flag
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-    return driver
-
-def validate_credentials(company_id, agency_id, user_email, password):
-    """Validate that all required credentials are provided and properly formatted"""
-    if not all([company_id, agency_id, user_email, password]):
-        raise ValueError("All SAP credentials must be provided via environment variables")
-
-    # Basic email validation
-    import re
-    if not re.match(r'^[^@]+@[^@]+\.[^@]+$', user_email):
-        raise ValueError("Invalid email format")
-
-    return True
-
+# ================== SCRAPER ==================
 class SAPCDPScraper:
+
     def __init__(self, url):
-        """Initialize scraper with CDP"""
         self.url = url
         self.all_candidates = []
         self.seen_candidates = set()
-        self.captured_responses = []
+        self.failed_indices = []
 
-        self.driver = create_driver()
-        self.wait = WebDriverWait(self.driver, 10)
+        options = webdriver.ChromeOptions()
+        options.add_argument('--start-maximized')
+        options.add_argument("--log-level=3")
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
-        # Enable CDP Network domain
-        self.driver.execute_cdp_cmd('Network.enable', {})
+        self.driver = webdriver.Chrome(options=options)
+        self.wait = WebDriverWait(self.driver, 15)
 
-    def login(self, company_id=None, agency_id=None, user_email=None, password=None):
-        """Automated login"""
-        # Get credentials from params or env vars only (no interactive input)
-        company_id = company_id or os.getenv('SAP_COMPANY_ID')
-        agency_id = agency_id or os.getenv('SAP_AGENCY_ID')
-        user_email = user_email or os.getenv('SAP_USER_EMAIL')
-        password = password or os.getenv('SAP_PASSWORD')
+    # ================== LOGIN ==================
+    def login(self):
 
-        # Validate credentials
-        validate_credentials(company_id, agency_id, user_email, password)
+        company_id = os.getenv("SAP_COMPANY_ID")
+        agency_id = os.getenv("SAP_AGENCY_ID")
+        email = os.getenv("SAP_EMAIL")
+        password = os.getenv("SAP_PASSWORD")
+
+        if not all([company_id, agency_id, email, password]):
+            raise Exception("Missing SAP credentials")
 
         self.driver.get(self.url)
         time.sleep(2)
 
-        # Company ID
-        logging.info("Logging in...")
-        company_field = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='companyId']")))
-        company_field.send_keys(company_id)
-        continue_btn = self.driver.find_element(By.CSS_SELECTOR, "button[id*='continueButton']")
-        continue_btn.click()
+        self.wait.until(EC.presence_of_element_located((By.NAME, "companyId"))).send_keys(company_id)
+        self.driver.find_element(By.CSS_SELECTOR, "button[id*='continueButton']").click()
+
         time.sleep(3)
 
-        # Credentials
-        agency_field = self.wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@placeholder, 'Agency ID')]")))
-        agency_field.send_keys(agency_id)
-        email_field = self.driver.find_element(By.XPATH, "//input[contains(@placeholder, 'Email')]")
-        email_field.send_keys(user_email)
-        pass_field = self.driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        pass_field.send_keys(password)
-        login_btn = self.driver.find_element(By.CSS_SELECTOR, "button[id*='login']")
-        login_btn.click()
+        self.wait.until(
+            EC.presence_of_element_located((By.XPATH, "//input[contains(@placeholder,'Agency')]"))).send_keys(agency_id)
+        self.driver.find_element(By.XPATH, "//input[contains(@placeholder,'Email')]").send_keys(email)
+        self.driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(password)
+        self.driver.find_element(By.CSS_SELECTOR, "button[id*='login']").click()
+
         time.sleep(5)
 
-        logging.info("✓ Login completed")
-        time.sleep(3)  # Wait for any dialogs to appear
+        if "login" in self.driver.current_url.lower():
+            raise Exception("Login failed")
 
-        time.sleep(2)
+        logging.info("Logged in")
 
-        # Navigate to Candidates tab using SAP UI5 API
-        logging.info("Navigating to Candidates page...")
+        self.switch_to_candidates()
 
-        time.sleep(2)
+    # ================== TAB SWITCH ==================
+    def switch_to_candidates(self):
+        """Robust SAP UI5 tab switch"""
 
-        # Method 1: Use SAP UI5 API to switch tabs (most reliable)
-        try:
-            switch_script = """
-            // Find and click Candidates tab using SAP UI5
-            var iconTabBar = sap.ui.getCore().byId('__bar0');
-            if (!iconTabBar) {
-                // Try to find any IconTabBar
-                var allControls = sap.ui.getCore().getUIArea('__area0').getContent();
-                for (var i = 0; i < allControls.length; i++) {
-                    var control = allControls[i];
-                    if (control.getMetadata().getName().includes('IconTabBar')) {
-                        iconTabBar = control;
-                        break;
-                    }
-                }
-            }
+        logging.info("Navigating to Candidates tab...")
 
-            if (iconTabBar) {
-                var items = iconTabBar.getItems();
-                for (var i = 0; i < items.length; i++) {
-                    var item = items[i];
-                    if (item.getText && item.getText() === 'Candidates') {
-                        iconTabBar.setSelectedItem(item);
-                        iconTabBar.fireSelect({item: item, key: item.getKey()});
-                        return 'SUCCESS: Switched to Candidates tab';
-                    }
-                }
-            }
-            return 'ERROR: Could not find Candidates tab';
-            """
-            result = self.driver.execute_script(switch_script)
-            logging.info(f"SAP UI5 method: {result}")
-            time.sleep(5)
-        except Exception as e:
-            logging.error(f"SAP UI5 method failed: {e}")
+        clicked = False
 
-            # Fallback: Direct click on Candidates span
+        for attempt in range(4):
             try:
-                candidates_span = self.driver.find_element(By.XPATH, "//span[text()='Candidates']")
-                self.driver.execute_script("arguments[0].click();", candidates_span)
-                time.sleep(5)
-                logging.info("Fallback: Clicked Candidates span")
-            except Exception as e2:
-                logging.error(f"All methods failed: {e2}")
-                self.driver.save_screenshot('navigation_failed.png')
+                # Method 1: inner text click (most reliable)
+                try:
+                    elem = self.driver.find_element(By.ID, "__xmlview0--candidateListSplitView-text")
+                    self.driver.execute_script("arguments[0].click();", elem)
+                    time.sleep(2)
+                except:
+                    pass
 
-        logging.info("✓ Ready to extract candidates!")
+                if "Search Candidate" in self.driver.page_source:
+                    clicked = True
+                    break
 
-        time.sleep(2)
+                # Method 2: direct click
+                try:
+                    elem = self.driver.find_element(By.ID, "__xmlview0--candidateListSplitView")
+                    self.driver.execute_script("arguments[0].click();", elem)
+                    time.sleep(2)
+                except:
+                    pass
 
-    def get_network_responses(self):
-        """Get all network responses from CDP"""
-        try:
-            # Execute JavaScript to access performance logs
-            script = """
-                var performance = window.performance || window.mozPerformance || window.msPerformance || window.webkitPerformance || {};
-                var entries = performance.getEntries() || [];
-                return entries.filter(e => e.name.includes('candidateList')).map(e => e.name);
-            """
-            urls = self.driver.execute_script(script)
-            return urls
-        except Exception as e:
-            logging.warning(f"Error getting network responses: {e}")
-            return []
+                if "Search Candidate" in self.driver.page_source:
+                    clicked = True
+                    break
 
-    def scroll_and_capture(self):
-        """Scroll left panel and let page load candidates"""
-        logging.info("Scrolling and capturing data...")
+                # Method 3: SAP UI5 firePress
+                self.driver.execute_script("""
+                    var tab = sap.ui.getCore().byId('__xmlview0--candidateListSplitView');
+                    if (tab && tab.firePress) {
+                        tab.firePress();
+                    }
+                """)
+                time.sleep(2)
 
-        # Find the scrollable container
-        try:
-            container = self.driver.find_element(By.ID, "__xmlview2--candidateMaster-cont")
-        except:
-            try:
-                container = self.driver.find_element(By.CSS_SELECTOR, "section.sapMPageEnableScrolling")
-            except:
-                logging.error("Could not find scroll container")
-                return
+                if "Search Candidate" in self.driver.page_source:
+                    clicked = True
+                    break
 
-        last_candidate_count = 0
+                # Method 4: setSelectedItem
+                self.driver.execute_script("""
+                    var tabBar = sap.ui.getCore().byId('__xmlview0--pageTabBar');
+                    var tab = sap.ui.getCore().byId('__xmlview0--candidateListSplitView');
+                    if (tabBar && tab) {
+                        tabBar.setSelectedItem(tab);
+                        tabBar.fireSelect({item: tab});
+                    }
+                """)
+                time.sleep(2)
+
+                if "Search Candidate" in self.driver.page_source:
+                    clicked = True
+                    break
+
+            except Exception as e:
+                logging.warning(f"Attempt {attempt + 1} failed: {e}")
+
+        if not clicked:
+            raise Exception("Could NOT switch to Candidates tab")
+
+        logging.info("Successfully switched to Candidates tab")
+    # ================== SCROLL ==================
+    def scroll_and_load_all(self, limit=100):
+        """Scroll only until required number of candidates are loaded"""
+
+        logging.info(f"Loading up to {limit} candidates...")
+
+        if "Search Candidate" not in self.driver.page_source:
+            raise Exception("Not in Candidates tab")
+
+        container = self.driver.find_element(By.ID, "__xmlview2--candidateMaster-cont")
+
+        last_count = 0
         no_change_count = 0
-        scroll_iteration = 0
 
-        while no_change_count < 5:
-            # Scroll down
+        while True:
+            # Scroll
             self.driver.execute_script(
                 "arguments[0].scrollTop = arguments[0].scrollHeight",
                 container
             )
-            scroll_iteration += 1
-            time.sleep(1.5)  # Wait for data to load
+            time.sleep(2)
 
-            # Count visible candidates
             candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
             current_count = len(candidates)
 
-            if current_count > last_candidate_count:
-                logging.info(f"Loaded {current_count} candidates in left panel (scroll {scroll_iteration})...")
-                last_candidate_count = current_count
-                no_change_count = 0
-            else:
+            logging.info(f"Loaded: {current_count}")
+
+            # ✅ STOP when limit reached
+            if current_count >= limit:
+                logging.info(f"Reached limit: {limit}")
+                break
+
+            # Stop if no more loading
+            if current_count == last_count:
                 no_change_count += 1
-                logging.info(f"No new candidates loaded (attempt {no_change_count}/5)")
-
-        logging.info(f"✓ Finished loading. Total candidates in panel: {last_candidate_count}")
-        return last_candidate_count
-
-    def extract_via_javascript(self):
-        """Use JavaScript to extract data directly from page's internal data"""
-        logging.info("Extracting data using JavaScript...")
-
-        script = """
-        // Try to access SAP UI5 model data
-        try {
-            var view = sap.ui.getCore().byId("__xmlview2");
-            if (!view) return null;
-
-            var model = view.getModel();
-            if (!model) return null;
-
-            var data = model.getData();
-            if (data && data.candidates) {
-                return data.candidates;
-            }
-
-            // Try alternative path
-            if (data && data.results) {
-                return data.results;
-            }
-
-            return null;
-        } catch (e) {
-            return null;
-        }
-        """
-
-        try:
-            data = self.driver.execute_script(script)
-            if data:
-                logging.info(f"✓ Extracted {len(data)} candidates from page model!")
-                return data
+                if no_change_count >= 3:
+                    logging.info("No more candidates loading")
+                    break
             else:
-                logging.warning("Could not extract from page model")
-                return None
-        except Exception as e:
-            logging.error(f"JavaScript extraction failed: {e}")
-            return None
+                no_change_count = 0
 
-    def extract_by_clicking(self, max_candidates=None, existing_candidates=None):
-        """
-        Extract by clicking through candidates
+            last_count = current_count
 
-        Args:
-            max_candidates: Maximum number to process
-            existing_candidates: Set of (email, phone, requisition_id) tuples already in DB
-        """
-        logging.info("Extracting by clicking through candidates...")
+        return min(current_count, limit)
 
-        candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
-        if max_candidates:
-            candidates = candidates[:max_candidates]
+    def normalize_phone(self, phone):
+        if not phone:
+            return ""
+        return ''.join(filter(str.isdigit, str(phone)))
 
-        total = len(candidates)
-        logging.info(f"Processing {total} candidates...")
-
-        skipped_count = 0
-        new_count = 0
-
-        for idx, candidate in enumerate(candidates, 1):
-            try:
-                if idx % 100 == 0 or idx == 1:
-                    logging.info(f"Processing candidate {idx}/{total}")
-
-                # Click candidate
-                try:
-                    candidate.click()
-                except:
-                    self.driver.execute_script("arguments[0].click();", candidate)
-
-                # Wait longer for detail panel to load (GitHub Actions needs more time)
-                time.sleep(3)
-
-                # Save screenshot for first candidate (debugging)
-                if idx == 1:
-                    try:
-                        self.driver.save_screenshot(f'candidate_detail_{idx}.png')
-                        logging.info(f"Saved screenshot: candidate_detail_{idx}.png")
-                    except:
-                        pass
-
-                # Extract details
-                candidate_data = self.extract_candidate_details()
-
-                # Check if candidate is new (if existing_candidates set provided)
-                if existing_candidates is not None:
-                    for record in candidate_data:
-                        # Create unique key
-                        key = (
-                            record.get('Email', '').lower().strip() if record.get('Email') else None,
-                            record.get('Phone', '').strip() if record.get('Phone') else None,
-                            record.get('Requisition_ID', '').strip() if record.get('Requisition_ID') else None
-                        )
-
-                        # Skip if already exists
-                        if key in existing_candidates:
-                            skipped_count += 1
-                            logging.debug(f"Skipping existing candidate: {record.get('Name')}")
-                        else:
-                            self.all_candidates.append(record)
-                            new_count += 1
-                else:
-                    # No filtering, add all
-                    self.all_candidates.extend(candidate_data)
-                    new_count += len(candidate_data)
-
-                # Save progress
-                if idx % 100 == 0:
-                    self.save_progress(f"cdp_progress_{idx}.csv")
-
-            except Exception as e:
-                logging.error(f"Error at candidate {idx}: {e}")
-                continue
-
-        if existing_candidates is not None:
-            logging.info(f"✓ Extracted {new_count} new records, skipped {skipped_count} existing")
-        else:
-            logging.info(f"✓ Extracted {len(self.all_candidates)} records")
-
-    def extract_candidate_details(self):
-        """Extract details from right pane"""
+    def extract_candidate_details(self, idx):
+        """Extract details with better error handling"""
         try:
-            candidate_info = {}
+            info = {}
 
             # Name
             try:
                 name = self.driver.find_element(By.XPATH,
-                    "//span[contains(@class, 'sapUxAPObjectPageHeaderTitleText')] | //h2//span").text
-                candidate_info['Name'] = name
+                                                "//span[contains(@class, 'sapUxAPObjectPageHeaderTitleText')] | //h2//span").text
+                info['Name'] = self.clean_text(self.clean_name(name))
             except:
-                candidate_info['Name'] = ""
-
+                info['Name'] = ""
+                logging.warning(f"Could not extract name for candidate {idx}")
             # Email
             try:
                 email = self.driver.find_element(By.XPATH,
-                    "//div[@id[contains(., 'emailAddress')]]//span[contains(@id, '__text')]").text
-                candidate_info['Email'] = email
-            except Exception as e:
-                logging.debug(f"Could not extract email: {e}")
-                candidate_info['Email'] = ""
+                                                 "//div[@id[contains(., 'emailAddress')]]//span[contains(@id, '__text')]").text
+                info['Email'] = self.clean(email).lower()
+            except:
+                info['Email'] = ""
 
             # Phone
             try:
                 phone = self.driver.find_element(By.XPATH,
-                    "//div[@id[contains(., 'phoneNumber')]]//span[contains(@id, '__text')]").text
-                candidate_info['Phone'] = phone
+                                                 "//div[@id[contains(., 'phoneNumber')]]//span[contains(@id, '__text')]").text
+                info['Phone'] = self.normalize_phone(phone)
             except:
-                candidate_info['Phone'] = ""
+                info['Phone'] = ""
 
-            # Created On
-            try:
-                created = self.driver.find_element(By.XPATH,
-                    "//div[@id[contains(., 'createdOn')]]//span[contains(@id, '__text')]").text
-                candidate_info['Created_On'] = created
-            except:
-                candidate_info['Created_On'] = ""
-
-            # Rights Expire
-            try:
-                expire = self.driver.find_element(By.XPATH,
-                    "//div[@id[contains(., 'rightsExpire')]]//span[contains(@id, '__text')]").text
-                candidate_info['Rights_Expire'] = expire
-            except:
-                candidate_info['Rights_Expire'] = ""
-
-            # Company
-            try:
-                company = self.driver.find_element(By.XPATH,
-                    "//div[@id[contains(., 'currentCompany')]]//span[contains(@id, '__text')] | //div[@id[contains(., 'company')]]//span[contains(@id, '__text')]").text
-                candidate_info['Company'] = company
-            except:
-                candidate_info['Company'] = ""
+            info['Created_On'] = self.get_field_by_label("Created")
+            info['Rights_Expire'] = self.get_field_by_label("Expire")
 
             # Job applications
-            job_applications = []
+            jobs = []
             try:
                 rows = self.driver.find_elements(By.XPATH,
-                    "//tbody[contains(@id, 'candJobReqTable')]//tr[@role='row']")
+                                                 "//tbody[contains(@id, 'candJobReqTable')]//tr[@role='row']")
 
                 for row in rows:
                     try:
                         cells = row.find_elements(By.CSS_SELECTOR, "td[role='gridcell']")
                         if len(cells) >= 4:
-                            job = candidate_info.copy()
+                            job = info.copy()
                             job['Requisition_ID'] = cells[0].text.strip()
                             job['Job_Title'] = cells[1].text.strip()
                             job['Status'] = cells[2].text.strip()
                             job['Forwarded_On'] = cells[3].text.strip()
-                            job_applications.append(job)
+                            jobs.append(job)
                     except:
                         continue
             except:
                 pass
 
-            if not job_applications:
-                candidate_info['Requisition_ID'] = ""
-                candidate_info['Job_Title'] = ""
-                candidate_info['Status'] = ""
-                candidate_info['Forwarded_On'] = ""
-                job_applications.append(candidate_info)
+            if not jobs:
+                info['Requisition_ID'] = ""
+                info['Job_Title'] = ""
+                info['Status'] = ""
+                info['Forwarded_On'] = ""
+                jobs.append(info)
 
-            return job_applications
+            # Track this candidate
+            if info['Email']:
+                self.seen_candidates.add(info['Email'])
+
+            return jobs
 
         except Exception as e:
-            logging.error(f"Error extracting details: {e}")
+            logging.error(f"Error extracting candidate {idx}: {e}")
             return []
 
-    def save_progress(self, filename):
-        """Save to CSV"""
-        if self.all_candidates:
-            df = pd.DataFrame(self.all_candidates)
-            df.to_csv(filename, index=False)
+    def clean_name(self, name):
+        if not name:
+            return ""
 
-    def save_to_excel(self, filename):
-        """Save to Excel"""
-        if self.all_candidates:
-            df = pd.DataFrame(self.all_candidates)
-            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='Candidates', index=False)
+        name = str(name).strip()
 
-    def close(self):
-        """Close browser"""
-        self.driver.quit()
+        # Case 1: split by words (most reliable)
+        words = name.split()
+        if len(words) % 2 == 0:
+            half = len(words) // 2
+            first_half = " ".join(words[:half])
+            second_half = " ".join(words[half:])
+            if first_half.lower() == second_half.lower():
+                return first_half
 
+        # Case 2: exact duplicate string
+        parts = name.split("  ")
+        if len(parts) == 2 and parts[0].strip().lower() == parts[1].strip().lower():
+            return parts[0].strip()
 
-def clean_duplicate_name(name):
-    """Remove duplicate names like 'John John' -> 'John'"""
-    import re
-    if not name or not isinstance(name, str):
         return name
-    parts = re.split(r'\s{2,}', name.strip())
-    if len(parts) == 2 and parts[0] == parts[1]:
-        return parts[0]
-    return name
 
-def normalize_date(date_str):
-    """
-    Normalize SAP date format to YYYY-MM-DD for PostgreSQL
+    def extract_all_loaded(self):
+        """Extract with retry logic for failed candidates"""
+        logging.info("Extracting all loaded candidates...")
 
-    Handles:
-    - "15-Mar-2026" → "2026-03-15"
-    - "15-03-2026" → "2026-03-15"
-    - "2026-03-15" → "2026-03-15"
-    """
-    if not date_str or not isinstance(date_str, str):
-        return None
+        candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+        # total = len(candidates)
 
-    try:
-        # Try parsing common formats
-        formats = [
-            '%d-%b-%Y',  # 15-Mar-2026 (SAP format)
-            '%d-%b-%y',  # 15-Mar-26
-            '%d-%m-%Y',  # 15-03-2026
-            '%Y-%m-%d',  # 2026-03-15 (already normalized)
-            '%d/%m/%Y',  # 15/03/2026
-            '%m/%d/%Y',  # 03/15/2026
-        ]
+        limit = min(100, len(candidates))
 
-        for fmt in formats:
+
+        logging.info(f"Processing {limit} candidates...")
+
+        extracted_count = 0
+        skipped_count = 0
+
+        for idx in range(limit):
             try:
-                dt = datetime.strptime(date_str.strip(), fmt)
-                return dt.strftime('%Y-%m-%d')
-            except ValueError:
+                # Progress log
+                if (idx + 1) % 50 == 0 or idx == 0:
+                    logging.info(
+                        f"Processing {idx + 1}/{limit} (Extracted: {extracted_count}, Skipped: {skipped_count})")
+
+                # Get fresh candidate list to avoid stale elements
+                candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+
+                if idx >= len(candidates):
+                    logging.warning(f"Candidate {idx + 1} not found in list")
+                    skipped_count += 1
+                    continue
+
+                candidate = candidates[idx]
+
+                # Try to click with multiple retries
+                clicked = False
+                for retry in range(3):
+                    try:
+                        # Try regular click
+                        candidate.click()
+                        clicked = True
+                        break
+                    except StaleElementReferenceException:
+                        # Re-fetch candidates
+                        time.sleep(0.5)
+                        candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+                        if idx < len(candidates):
+                            candidate = candidates[idx]
+                    except:
+                        # Try JavaScript click
+                        try:
+                            self.driver.execute_script("arguments[0].click();", candidate)
+                            clicked = True
+                            break
+                        except:
+                            time.sleep(0.5)
+
+                if not clicked:
+                    logging.error(f"Could not click candidate {idx + 1}")
+                    self.failed_indices.append(idx + 1)
+                    skipped_count += 1
+                    continue
+
+                # Wait for details to load
+                time.sleep(0.6)
+
+                # Extract details
+                details = self.extract_candidate_details(idx + 1)
+
+                if details and len(details) > 0:
+                    self.all_candidates.extend(details)
+                    extracted_count += 1
+                else:
+                    logging.warning(f"No details extracted for candidate {idx + 1}")
+                    self.failed_indices.append(idx + 1)
+                    skipped_count += 1
+
+            except Exception as e:
+                logging.error(f"Error at candidate {idx + 1}: {e}")
+                self.failed_indices.append(idx + 1)
+                skipped_count += 1
                 continue
 
-        # If all parsing fails, return None (will be NULL in DB)
-        logging.warning(f"Could not parse date: {date_str}")
-        return None
-    except Exception as e:
-        logging.warning(f"Error normalizing date '{date_str}': {e}")
-        return None
+        logging.info(f"\n{'=' * 60}")
+        logging.info(f"Extraction complete!")
+        logging.info(f"  candidates: {limit}")
+        logging.info(f"  Successfully extracted: {extracted_count}")
+        logging.info(f"  Skipped/Failed: {skipped_count}")
+        logging.info(f"  records: {len(self.all_candidates)}")
+        logging.info(f"  Unique emails: {len(self.seen_candidates)}")
 
-def get_existing_candidates(db_host, db_port, db_name, db_user, db_password, db_table):
-    """
-    Query database for existing candidates to avoid re-processing
+        if self.failed_indices:
+            logging.warning(f"  Failed indices: {self.failed_indices[:10]}..." if len(
+                self.failed_indices) > 10 else f"  Failed indices: {self.failed_indices}")
 
-    Returns:
-        Set of (email, phone, requisition_id) tuples
-    """
-    import psycopg2
+        logging.info(f"{'=' * 60}")
 
-    try:
-        conn = psycopg2.connect(
-            host=db_host,
-            port=int(db_port),
-            database=db_name,
-            user=db_user,
-            password=db_password
-        )
-        cursor = conn.cursor()
+    def get_field_by_label(self, label):
+        try:
+            # find any container having label text
+            container = self.driver.find_element(
+                By.XPATH,
+                f"//*[contains(text(), '{label}')]"
+            )
 
-        # Query all existing unique keys
-        query = f"""
-            SELECT LOWER(TRIM(email)), TRIM(phone), TRIM(requisition_id)
-            FROM {db_table}
-            WHERE email IS NOT NULL OR phone IS NOT NULL
-        """
+            # find nearest value span inside same block
+            value = container.find_element(
+                By.XPATH,
+                ".//following::span[contains(@id,'__text')][1]"
+            )
 
-        cursor.execute(query)
-        rows = cursor.fetchall()
+            return value.text.strip()
 
-        # Create set of tuples for fast lookup
-        existing = set(rows)
+        except Exception as e:
+            logging.warning(f"{label} not found: {e}")
+            return ""
 
-        cursor.close()
-        conn.close()
+    def retry_failed_candidates(self):
+        """Retry extraction for failed candidates"""
+        if not self.failed_indices:
+            return
 
-        logging.info(f"📊 Found {len(existing)} existing candidates in database")
+        logging.info(f"\nRetrying {len(self.failed_indices)} failed candidates...")
+
+        for idx in self.failed_indices[:]:  # Copy list to modify during iteration
+            try:
+                logging.info(f"Retrying candidate {idx}...")
+
+                candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+                if idx - 1 >= len(candidates):
+                    continue
+
+                candidate = candidates[idx - 1]
+                candidate.click()
+                time.sleep(0.8)
+
+                details = self.extract_candidate_details(idx)
+                if details and len(details) > 0:
+                    self.all_candidates.extend(details)
+                    self.failed_indices.remove(idx)
+                    logging.info(f"✓ Successfully retried candidate {idx}")
+
+            except Exception as e:
+                logging.error(f"Retry failed for candidate {idx}: {e}")
+                continue
+
+        if self.failed_indices:
+            logging.warning(f"Still failed after retry: {self.failed_indices}")
+        else:
+            logging.info("✓ All retries successful!")
+
+    # ================== FILTER ==================
+    def get_existing_keys(self):
+
+        response = supabase.table("candidates") \
+            .select("email, phone, requisition_id") \
+            .limit(10000) \
+            .execute()
+
+        existing = set()
+
+        for row in response.data:
+            key = (
+                row.get("email") or "",
+                row.get("phone") or "",
+                row.get("requisition_id") or ""
+            )
+            existing.add(key)
+
+        logging.info(f"Loaded {len(existing)} existing records")
+
         return existing
 
-    except Exception as e:
-        logging.warning(f"⚠️  Could not query existing candidates: {e}")
-        logging.warning("Will proceed without incremental filtering")
-        return None
+    def filter_new_candidates(self, existing_keys):
 
+        new_data = []
 
-def main():
-    import os
+        for row in self.all_candidates:
+            key = (
+                row.get("Email") or "",
+                row.get("Phone") or "",
+                row.get("Requisition_ID") or ""
+            )
 
-    # ===================================================================
-    # CONFIGURATION
-    # ===================================================================
-    DB_INSERT = True  # Set to True to enable database insertion
-    INCREMENTAL_MODE = True  # Set to True to skip existing candidates
-    # ===================================================================
+            if key not in existing_keys:
+                new_data.append(row)
 
-    print("=" * 70)
-    print("🚀 SAP AUTOMATED SCRAPER - BASED ON WORKING CODE")
-    print("=" * 70)
-    print("\nUses the exact extraction logic that works!\n")
+        logging.info(f"New records: {len(new_data)}")
 
-    URL = os.getenv('SAP_URL', 'https://agencysvc44.sapsf.com/login')
+        return new_data
 
-    # Get max candidates from env var or default to all
-    max_candidates_env = os.getenv('SAP_MAX_CANDIDATES')
-    if max_candidates_env:
-        max_candidates = int(max_candidates_env)
-    else:
-        # Default to scraping all candidates (for GitHub Actions/non-interactive)
-        max_candidates = None
-        logging.info("SAP_MAX_CANDIDATES not set - will scrape all candidates")
+    # ================== DATE ==================
 
-    scraper = SAPCDPScraper(URL)
+    def parse_date(self, val):
+        try:
+            if not val:
+                return None
+            return parser.parse(val).date().isoformat()
+        except:
+            return None
 
-    try:
-        # Login with automation
-        scraper.login()
+    # ================== SUPABASE ==================
+    def upload_supabase(self, data):
 
-        # Get existing candidates if incremental mode enabled
-        existing_candidates = None
-        if INCREMENTAL_MODE and DB_INSERT:
-            db_host = os.getenv('DB_HOST')
-            db_port = os.getenv('DB_PORT', '5432')
-            db_name = os.getenv('DB_NAME')
-            db_user = os.getenv('DB_USER')
-            db_password = os.getenv('DB_PASSWORD')
-            db_table = os.getenv('DB_TABLE', 'candidates')
+        if not data:
+            logging.warning("No new data")
+            return
 
-            if all([db_host, db_name, db_user, db_password]):
-                existing_candidates = get_existing_candidates(
-                    db_host, db_port, db_name, db_user, db_password, db_table
-                )
+        logging.info(f"Uploading {len(data)} records...")
 
-        # Extract by clicking through candidates
-        logging.info("Using click-through method...")
-        scraper.extract_by_clicking(
-            max_candidates=max_candidates,
-            existing_candidates=existing_candidates
-        )
+        # ✅ Deduplicate once
+        data = self.deduplicate_data(data)
 
-        # Save results
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_filename = f"sap_cdp_candidates_{timestamp}.csv"
-        excel_filename = f"sap_cdp_candidates_{timestamp}.xlsx"
+        batch_size = 25
 
-        scraper.save_to_excel(excel_filename)
-        scraper.save_progress(csv_filename)
+        import time
 
-        print("\n" + "=" * 70)
-        print("✓ Extraction completed!")
-        print(f"✓ Total records: {len(scraper.all_candidates)}")
-        print(f"✓ Saved CSV: {csv_filename}")
-        print(f"✓ Saved Excel: {excel_filename}")
-        print("=" * 70)
+        for i in range(0, len(data), batch_size):
 
-        # Database insertion (controlled by DB_INSERT flag)
-        if DB_INSERT:
-            import os
-            import psycopg2
-            from psycopg2 import pool
+            batch = data[i:i + batch_size]
 
-            # Get database credentials
-            db_host = os.getenv('DB_HOST')
-            db_port = os.getenv('DB_PORT', '5432')
-            db_name = os.getenv('DB_NAME')
-            db_user = os.getenv('DB_USER')
-            db_password = os.getenv('DB_PASSWORD')
-            db_table = os.getenv('DB_TABLE', 'candidates')
-            audit_username = os.getenv('AUDIT_USERNAME', 'sap_scraper')
+            formatted = []
 
-            if all([db_host, db_name, db_user, db_password]):
-                logging.info("\n" + "=" * 70)
-                logging.info("📤 Inserting data to PostgreSQL...")
-                logging.info("=" * 70)
+            for row in batch:
+                if not row.get("Requisition_ID"):
+                    continue
 
+                formatted.append({
+                    "name": self.clean_text(row.get("Name")),
+
+                    "email": self.clean(row.get("Email")).lower(),
+                    "phone": self.normalize_phone(row.get("Phone")),
+
+                    "date": self.parse_date(row.get("Created_On")),
+                    "rights_expire": self.parse_date(row.get("Rights_Expire")),
+                    "forwarded_on": self.parse_date(row.get("Forwarded_On")),
+
+                    "requisition_id": self.clean(row.get("Requisition_ID")),
+                    "job_title": self.clean_text(row.get("Job_Title")),
+                    "status": self.clean_text(row.get("Status")),
+
+                    "company": "BS",
+                    "created_by": "bot",
+                    "modified_by": "bot"
+                })
+
+            if not formatted:
+                continue
+
+            # ✅ Retry logic ONLY here
+            for attempt in range(3):
                 try:
-                    # Create connection
-                    conn = psycopg2.connect(
-                        host=db_host,
-                        port=int(db_port),
-                        database=db_name,
-                        user=db_user,
-                        password=db_password
-                    )
-                    cursor = conn.cursor()
+                    supabase.table("candidates").upsert(
+                        formatted,
+                        on_conflict="email,phone,requisition_id",
+                        ignore_duplicates=True
+                    ).execute()
 
-                    # Clean data before insertion
-                    df = pd.DataFrame(scraper.all_candidates)
-
-                    # Remove duplicate names (e.g., "John John" -> "John")
-                    if 'Name' in df.columns:
-                        df['Name'] = df['Name'].apply(lambda x: clean_duplicate_name(x) if pd.notna(x) else x)
-
-                    # Trim whitespace for all text columns
-                    for col in df.columns:
-                        if df[col].dtype == 'object':
-                            df[col] = df[col].str.strip() if hasattr(df[col], 'str') else df[col]
-
-                    # Lowercase emails
-                    if 'Email' in df.columns:
-                        df['Email'] = df['Email'].str.lower()
-
-                    # Convert to records for insertion
-                    records = df.to_dict('records')
-
-                    # Insert each record with audit fields
-                    inserted_count = 0
-                    duplicate_count = 0
-
-                    for idx, record in enumerate(records, 1):
-                        # Prepare fields and values (following hr-email-automation pattern)
-                        fields = []
-                        values = []
-                        placeholders = []
-
-                        # Map SAP fields to DB columns (adjust these based on your table schema)
-                        field_mapping = {
-                            'Name': 'name',
-                            'Email': 'email',
-                            'Phone': 'phone',
-                            'Created_On': 'created_on',
-                            'Rights_Expire': 'rights_expire',
-                            'Requisition_ID': 'requisition_id',
-                            'Job_Title': 'job_title',
-                            'Status': 'status',
-                            'Forwarded_On': 'forwarded_on'
-                        }
-
-                        # Add record fields
-                        date_fields = {'Created_On', 'Rights_Expire', 'Forwarded_On'}
-
-                        for sap_field, db_field in field_mapping.items():
-                            if sap_field in record and record[sap_field]:
-                                value = record[sap_field]
-
-                                # Normalize dates to YYYY-MM-DD
-                                if sap_field in date_fields:
-                                    value = normalize_date(value)
-                                    if not value:  # Skip if date normalization failed
-                                        continue
-                                # Trim text values
-                                elif isinstance(value, str):
-                                    value = value.strip()
-
-                                if value:  # Only add if not empty
-                                    fields.append(db_field)
-                                    values.append(value)
-                                    placeholders.append('%s')
-
-                        # Add audit fields (following hr-email-automation pattern)
-                        audit_time = datetime.now()
-
-                        fields.extend(['created_by', 'created_date', 'modified_by', 'modified_date'])
-                        values.extend([audit_username, audit_time, audit_username, audit_time])
-                        placeholders.extend(['%s', '%s', '%s', '%s'])
-
-                        # Build and execute INSERT query
-                        query = f"""
-                            INSERT INTO {db_table} ({', '.join(fields)})
-                            VALUES ({', '.join(placeholders)})
-                        """
-
-                        try:
-                            cursor.execute(query, tuple(values))
-                            conn.commit()
-                            inserted_count += 1
-
-                            if idx % 100 == 0:
-                                logging.info(f"✓ Inserted {idx}/{len(records)} records...")
-                        except psycopg2.errors.UniqueViolation:
-                            conn.rollback()
-                            duplicate_count += 1
-                            logging.debug(f"Duplicate found for record {idx}, skipping")
-                        except Exception as e:
-                            conn.rollback()
-                            logging.error(f"❌ Error inserting record {idx}: {e}")
-
-                    cursor.close()
-                    conn.close()
-
-                    print("\n" + "=" * 70)
-                    print("✓ Database insertion completed:")
-                    print(f"  - Inserted: {inserted_count} records")
-                    print(f"  - Duplicates skipped: {duplicate_count} records")
-                    print("=" * 70)
+                    print(f"Inserted {len(formatted)}")
+                    break
 
                 except Exception as e:
-                    logging.error(f"❌ Database connection error: {e}")
-            else:
-                logging.warning("⚠️  Database credentials not found - skipping database insertion")
-        else:
-            logging.info("ℹ️  Database insertion disabled (DB_INSERT = False)")
+                    logging.error(f"Retry {attempt + 1} failed: {e}")
+                    time.sleep(2)
+    # ================== SAVE ==================
+    def save_excel(self):
+        df = pd.DataFrame(self.all_candidates)
+        file = f"output_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        df.to_excel(file, index=False)
+        logging.info(f"Saved {file}")
 
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    def close(self):
+        self.driver.quit()
+
+    def clean(self, val):
+        if val is None:
+            return ""
+        return str(val).strip()
+
+    def clean_text(self, val):
+        if val is None:
+            return ""
+        return " ".join(str(val).strip().split())  # removes extra spaces inside also
+
+    def deduplicate_data(self, data):
+        unique = {}
+
+        for row in data:
+            key = (
+                self.clean(row.get("Email")).lower(),
+                self.normalize_phone(row.get("Phone")),
+                self.clean(row.get("Requisition_ID"))
+            )
+            unique[key] = row
+
+        return list(unique.values())
+
+
+# ================== MAIN ==================
+def main():
+
+    scraper = SAPCDPScraper("https://agencysvc44.sapsf.com/login")
+
+    try:
+        scraper.login()
+
+        scraper.scroll_and_load_all(limit=100)
+
+        scraper.extract_all_loaded()
+
+        scraper.save_excel()
+
+        # ✅ no existing_keys
+        new_data = scraper.deduplicate_data(scraper.all_candidates)
+
+        scraper.upload_supabase(new_data)
+
+        print(f"DONE: {len(new_data)} new records")
+
     finally:
         scraper.close()
 
