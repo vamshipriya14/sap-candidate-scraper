@@ -1,11 +1,9 @@
 name: SAP Incremental Scraper
 
 on:
-  # Run on schedule (every day at 9 AM UTC)
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '*/30 * * * *'
 
-  # Allow manual trigger
   workflow_dispatch:
     inputs:
       days_back:
@@ -13,7 +11,7 @@ on:
         required: false
         default: '7'
       max_candidates:
-        description: 'Max candidates to process (leave empty for all)'
+        description: 'Max candidates to process'
         required: false
         default: ''
 
@@ -22,73 +20,69 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-    - name: Install Chrome
-      uses: browser-actions/setup-chrome@v1
+      # ✅ Install Chrome + dependencies (IMPORTANT)
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
 
-    - name: Install ChromeDriver
-      uses: nanasess/setup-chromedriver@v2
+      - name: Install ChromeDriver
+        uses: nanasess/setup-chromedriver@v2
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Display Chrome version
-      run: |
-        google-chrome --version
-        chromedriver --version
+      - name: Display versions
+        run: |
+          google-chrome --version
+          chromedriver --version
+          python --version
 
-    - name: Run SAP Scraper
-      env:
-        SAP_URL: ${{ secrets.SAP_URL }}
-        SAP_COMPANY_ID: ${{ secrets.SAP_COMPANY_ID }}
-        SAP_AGENCY_ID: ${{ secrets.SAP_AGENCY_ID }}
-        SAP_USER_EMAIL: ${{ secrets.SAP_USER_EMAIL }}
-        SAP_PASSWORD: ${{ secrets.SAP_PASSWORD }}
-        SAP_MAX_CANDIDATES: ${{ github.event.inputs.max_candidates || '' }}
-        DB_HOST: ${{ secrets.DB_HOST }}
-        DB_PORT: ${{ secrets.DB_PORT }}
-        DB_NAME: ${{ secrets.DB_NAME }}
-        DB_USER: ${{ secrets.DB_USER }}
-        DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        DB_TABLE: ${{ secrets.DB_TABLE }}
-        AUDIT_USERNAME: ${{ secrets.AUDIT_USERNAME }}
-      run: |
-        # Run the scraper (using working automated script)
-        python sap_scraper_automated.py
+      # ✅ Run scraper
+      - name: Run SAP Scraper
+        env:
+          SAP_URL: ${{ secrets.SAP_URL }}
+          SAP_COMPANY_ID: ${{ secrets.SAP_COMPANY_ID }}
+          SAP_AGENCY_ID: ${{ secrets.SAP_AGENCY_ID }}
+          SAP_EMAIL: ${{ secrets.SAP_USER_EMAIL }}
+          SAP_PASSWORD: ${{ secrets.SAP_PASSWORD }}
 
-    - name: Upload extracted data
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: sap-candidates-${{ github.run_number }}
-        path: |
-          sap_cdp_candidates_*.csv
-          sap_cdp_candidates_*.xlsx
-        retention-days: 90
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
-    - name: Upload logs and screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: scraper-logs-${{ github.run_number }}
-        path: |
-          *.log
-          *.png
-          *.html
-        retention-days: 30
+          MAX_CANDIDATES: ${{ github.event.inputs.max_candidates || '100' }}
 
-    - name: Notify on failure
-      if: failure()
-      run: |
-        echo "Scraper failed! Check the logs."
-        # You can add Slack/email notification here
+        run: |
+          python sap_scraper_automated.py
+
+      # ✅ Upload outputs
+      - name: Upload extracted data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sap-candidates-${{ github.run_number }}
+          path: |
+            output_*.xlsx
+          retention-days: 30
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-logs-${{ github.run_number }}
+          path: |
+            *.log
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "Scraper failed! Check logs."
