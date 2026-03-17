@@ -51,7 +51,10 @@ class SAPCDPScraper:
         self.failed_indices = []
 
         options = webdriver.ChromeOptions()
-        options.add_argument('--start-maximized')
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
         options.add_argument("--log-level=3")
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
@@ -86,6 +89,10 @@ class SAPCDPScraper:
         time.sleep(5)
 
         if "login" in self.driver.current_url.lower():
+            self.driver.save_screenshot("login_error.png")
+            with open("login_error.html", "w", encoding="utf-8") as f:
+                f.write(self.driver.page_source)
+
             raise Exception("Login failed")
 
         logging.info("Logged in")
@@ -158,6 +165,10 @@ class SAPCDPScraper:
                 logging.warning(f"Attempt {attempt + 1} failed: {e}")
 
         if not clicked:
+            self.driver.save_screenshot("tab_switch_error.png")
+            with open("tab_switch_error.html", "w", encoding="utf-8") as f:
+                f.write(self.driver.page_source)
+
             raise Exception("Could NOT switch to Candidates tab")
 
         logging.info("Successfully switched to Candidates tab")
@@ -240,8 +251,8 @@ class SAPCDPScraper:
             except:
                 info['Phone'] = ""
 
-            info['Created_On'] = self.get_field_by_label("Created")
-            info['Rights_Expire'] = self.get_field_by_label("Expire")
+            info['Created_On'] = self.get_field_by_label("Created On")
+            info['Rights_Expire'] = self.get_field_by_label("Rights Expire")
 
             # Job applications
             jobs = []
@@ -277,10 +288,20 @@ class SAPCDPScraper:
 
             return jobs
 
-        except Exception as e:
-            logging.error(f"Error extracting candidate {idx}: {e}")
-            return []
 
+        except Exception as e:
+
+            logging.error(f"Error extracting candidate {idx}: {e}")
+
+            # 🔥 DEBUG CAPTURE
+
+            self.driver.save_screenshot(f"error_extract_{idx}.png")
+
+            with open(f"error_extract_{idx}.html", "w", encoding="utf-8") as f:
+
+                f.write(self.driver.page_source)
+
+            return []
     def clean_name(self, name):
         if not name:
             return ""
@@ -304,14 +325,12 @@ class SAPCDPScraper:
         return name
 
     def extract_all_loaded(self):
-        """Extract with retry logic for failed candidates"""
+        """FINAL: Stable extraction using real UI click (SAP-safe)"""
+
         logging.info("Extracting all loaded candidates...")
 
         candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
-        # total = len(candidates)
-
         limit = min(100, len(candidates))
-
 
         logging.info(f"Processing {limit} candidates...")
 
@@ -320,57 +339,81 @@ class SAPCDPScraper:
 
         for idx in range(limit):
             try:
-                # Progress log
                 if (idx + 1) % 50 == 0 or idx == 0:
                     logging.info(
-                        f"Processing {idx + 1}/{limit} (Extracted: {extracted_count}, Skipped: {skipped_count})")
+                        f"Processing {idx + 1}/{limit} (Extracted: {extracted_count}, Skipped: {skipped_count})"
+                    )
 
-                # Get fresh candidate list to avoid stale elements
-                candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+                # ================== STEP 1: Get previous email ==================
+                prev_email = ""
+                try:
+                    prev_email = self.driver.find_element(
+                        By.XPATH,
+                        "//div[contains(@id,'emailAddress')]//span[contains(@id,'__text')]"
+                    ).text.strip()
+                except:
+                    pass
 
-                if idx >= len(candidates):
-                    logging.warning(f"Candidate {idx + 1} not found in list")
-                    skipped_count += 1
-                    continue
+                # ================== STEP 2: REAL CLICK (SAP UI FIX) ==================
+                self.driver.execute_script("""
+                    var items = document.querySelectorAll("li.sapMCLI");
+                    if (items.length > arguments[0]) {
+                        var el = items[arguments[0]];
+                        el.scrollIntoView({block: 'center'});
 
-                candidate = candidates[idx]
+                        el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                        el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                        el.click();
+                    }
+                """, idx)
 
-                # Try to click with multiple retries
-                clicked = False
-                for retry in range(3):
+                # ================== STEP 3: WAIT FOR NEW DATA ==================
+                new_email = prev_email
+
+                for _ in range(15):
+                    time.sleep(0.6)
                     try:
-                        # Try regular click
-                        candidate.click()
-                        clicked = True
-                        break
-                    except StaleElementReferenceException:
-                        # Re-fetch candidates
-                        time.sleep(0.5)
-                        candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
-                        if idx < len(candidates):
-                            candidate = candidates[idx]
-                    except:
-                        # Try JavaScript click
-                        try:
-                            self.driver.execute_script("arguments[0].click();", candidate)
-                            clicked = True
+                        new_email = self.driver.find_element(
+                            By.XPATH,
+                            "//div[contains(@id,'emailAddress')]//span[contains(@id,'__text')]"
+                        ).text.strip()
+
+                        if new_email and new_email != prev_email:
                             break
-                        except:
-                            time.sleep(0.5)
+                    except:
+                        continue
 
-                if not clicked:
-                    logging.error(f"Could not click candidate {idx + 1}")
-                    self.failed_indices.append(idx + 1)
-                    skipped_count += 1
-                    continue
+                # ================== DEBUG LOG ==================
+                try:
+                    new_name = self.driver.find_element(
+                        By.XPATH,
+                        "//span[contains(@class,'sapUxAPObjectPageHeaderTitleText')]"
+                    ).text.strip()
+                except:
+                    new_name = ""
 
-                # Wait for details to load
-                time.sleep(0.6)
+                logging.info(f"Selected candidate {idx + 1}: {new_name}")
+                logging.info(f"Email: {new_email}")
 
-                # Extract details
+                # ================== SAFETY CHECK ==================
+                # ================== SAFETY CHECK ==================
+
+                # ✅ For FIRST candidate → DO NOT SKIP
+                if idx == 0:
+                    if not new_email:
+                        logging.warning("⚠️ First candidate has no email, skipping")
+                        skipped_count += 1
+                        continue
+                else:
+                    if not new_email or new_email == prev_email:
+                        logging.warning(f"⚠️ Candidate {idx + 1} did not change, skipping")
+                        skipped_count += 1
+                        continue
+
+                # ================== STEP 4: EXTRACT ==================
                 details = self.extract_candidate_details(idx + 1)
 
-                if details and len(details) > 0:
+                if details:
                     self.all_candidates.extend(details)
                     extracted_count += 1
                 else:
@@ -380,21 +423,31 @@ class SAPCDPScraper:
 
             except Exception as e:
                 logging.error(f"Error at candidate {idx + 1}: {e}")
+
+                # DEBUG capture
+                self.driver.save_screenshot(f"error_candidate_{idx + 1}.png")
+                with open(f"error_candidate_{idx + 1}.html", "w", encoding="utf-8") as f:
+                    f.write(self.driver.page_source)
+
                 self.failed_indices.append(idx + 1)
                 skipped_count += 1
                 continue
 
+        # ================== SUMMARY ==================
         logging.info(f"\n{'=' * 60}")
-        logging.info(f"Extraction complete!")
-        logging.info(f"  candidates: {limit}")
+        logging.info("Extraction complete!")
+        logging.info(f"  candidates processed: {limit}")
         logging.info(f"  Successfully extracted: {extracted_count}")
         logging.info(f"  Skipped/Failed: {skipped_count}")
-        logging.info(f"  records: {len(self.all_candidates)}")
+        logging.info(f"  Total records: {len(self.all_candidates)}")
         logging.info(f"  Unique emails: {len(self.seen_candidates)}")
 
         if self.failed_indices:
-            logging.warning(f"  Failed indices: {self.failed_indices[:10]}..." if len(
-                self.failed_indices) > 10 else f"  Failed indices: {self.failed_indices}")
+            logging.warning(
+                f"  Failed indices: {self.failed_indices[:10]}..."
+                if len(self.failed_indices) > 10
+                else f"  Failed indices: {self.failed_indices}"
+            )
 
         logging.info(f"{'=' * 60}")
 
@@ -433,9 +486,43 @@ class SAPCDPScraper:
                 if idx - 1 >= len(candidates):
                     continue
 
-                candidate = candidates[idx - 1]
-                candidate.click()
+                # ALWAYS re-fetch fresh list
+                candidates = self.driver.find_elements(By.CSS_SELECTOR, "li.sapMCLI")
+
+                # Use JS click by index (VERY IMPORTANT)
+                self.driver.execute_script("""
+                    var list = document.querySelectorAll('li.sapMCLI');
+                    if (list[arguments[0]]) {
+                        list[arguments[0]].click();
+                    }
+                """, idx)
                 time.sleep(0.8)
+
+
+                # Get previous name
+                prev_name = self.driver.find_element(
+                    By.XPATH,
+                    "//span[contains(@class,'sapUxAPObjectPageHeaderTitleText')]"
+                ).text
+
+                for _ in range(15):
+                    time.sleep(0.7)
+                    try:
+                        new_name = self.driver.find_element(
+                            By.XPATH,
+                            "//span[contains(@class,'sapUxAPObjectPageHeaderTitleText')]"
+                        ).text
+
+                        # ALSO check email (stronger signal)
+                        new_email = self.driver.find_element(
+                            By.XPATH,
+                            "//div[contains(@id,'emailAddress')]//span[contains(@id,'__text')]"
+                        ).text
+
+                        if new_name != prev_name or new_email:
+                            break
+                    except:
+                        continue
 
                 details = self.extract_candidate_details(idx)
                 if details and len(details) > 0:
