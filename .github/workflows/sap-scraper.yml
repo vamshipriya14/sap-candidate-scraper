@@ -31,30 +31,23 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Set up Chrome
+    - name: Install Chrome
       uses: browser-actions/setup-chrome@v1
-      with:
-        chrome-version: stable
 
     - name: Install ChromeDriver
       uses: nanasess/setup-chromedriver@v2
 
-    - name: Install Xvfb (Virtual Display)
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
     - name: Display Chrome version
       run: |
         google-chrome --version
         chromedriver --version
 
-    - name: Run SAP Scraper with Xvfb
+    - name: Run SAP Scraper
       env:
         SAP_URL: ${{ secrets.SAP_URL }}
         SAP_COMPANY_ID: ${{ secrets.SAP_COMPANY_ID }}
@@ -69,12 +62,7 @@ jobs:
         DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         DB_TABLE: ${{ secrets.DB_TABLE }}
         AUDIT_USERNAME: ${{ secrets.AUDIT_USERNAME }}
-        DISPLAY: ':99'
       run: |
-        # Start Xvfb (virtual display)
-        Xvfb :99 -screen 0 1920x1080x24 &
-        sleep 3
-
         # Run the scraper (using working automated script)
         python sap_scraper_automated.py
 

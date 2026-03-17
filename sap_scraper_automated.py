@@ -7,11 +7,13 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 import pandas as pd
 import time
-import json
 from datetime import datetime
 import logging
+import tempfile
+import os
 
 # Setup logging
 logging.basicConfig(
@@ -23,6 +25,65 @@ logging.basicConfig(
     ]
 )
 
+def create_driver():
+    options = Options()
+
+    # =========================
+    # HEADLESS (GitHub Actions)
+    # =========================
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+
+    # =========================
+    # CLEAN PROFILE (IMPORTANT)
+    # =========================
+    temp_profile = tempfile.mkdtemp()
+    options.add_argument(f"--user-data-dir={temp_profile}")
+
+    # =========================
+    # DISABLE PASSWORD FEATURES
+    # =========================
+    options.add_argument("--disable-features=PasswordLeakDetection,PasswordManagerOnboarding")
+
+    prefs = {
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
+        "profile.password_manager_leak_detection": False,
+    }
+
+    options.add_experimental_option("prefs", prefs)
+
+    # =========================
+    # OTHER STABILITY FLAGS
+    # =========================
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # =========================
+    # CREATE DRIVER
+    # =========================
+    driver = webdriver.Chrome(options=options)
+
+    # Hide automation flag
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+    return driver
+
+def validate_credentials(company_id, agency_id, user_email, password):
+    """Validate that all required credentials are provided and properly formatted"""
+    if not all([company_id, agency_id, user_email, password]):
+        raise ValueError("All SAP credentials must be provided via environment variables")
+
+    # Basic email validation
+    import re
+    if not re.match(r'^[^@]+@[^@]+\.[^@]+$', user_email):
+        raise ValueError("Invalid email format")
+
+    return True
+
 class SAPCDPScraper:
     def __init__(self, url):
         """Initialize scraper with CDP"""
@@ -31,49 +92,22 @@ class SAPCDPScraper:
         self.seen_candidates = set()
         self.captured_responses = []
 
-        # Setup Chrome with password manager disabled
-        options = webdriver.ChromeOptions()
-        options.add_argument('--start-maximized')
-        options.add_argument('--disable-save-password-bubble')
-
-        # Additional arguments to prevent password manager dialog
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--disable-password-generation')
-        options.add_argument('--disable-password-manager-reauthentication')
-        options.add_argument('--no-first-run')
-        options.add_argument('--no-service-autorun')
-        options.add_argument('--password-store=basic')
-
-        # Disable password manager
-        prefs = {
-            "credentials_enable_service": False,
-            "profile.password_manager_enabled": False,
-            "profile.default_content_setting_values.notifications": 2,
-            "profile.default_content_setting_values.automatic_downloads": 1,
-        }
-        options.add_experimental_option("prefs", prefs)
-        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        options.add_experimental_option('useAutomationExtension', False)
-
-        self.driver = webdriver.Chrome(options=options)
+        self.driver = create_driver()
         self.wait = WebDriverWait(self.driver, 10)
-
-        # Remove webdriver property
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         # Enable CDP Network domain
         self.driver.execute_cdp_cmd('Network.enable', {})
 
     def login(self, company_id=None, agency_id=None, user_email=None, password=None):
         """Automated login"""
-        import os
-        import getpass
+        # Get credentials from params or env vars only (no interactive input)
+        company_id = company_id or os.getenv('SAP_COMPANY_ID')
+        agency_id = agency_id or os.getenv('SAP_AGENCY_ID')
+        user_email = user_email or os.getenv('SAP_USER_EMAIL')
+        password = password or os.getenv('SAP_PASSWORD')
 
-        # Get credentials from params, env vars, or input
-        company_id = company_id or os.getenv('SAP_COMPANY_ID') or input("Company ID: ").strip()
-        agency_id = agency_id or os.getenv('SAP_AGENCY_ID') or input("Agency ID: ").strip()
-        user_email = user_email or os.getenv('SAP_USER_EMAIL') or input("User Email: ").strip()
-        password = password or os.getenv('SAP_PASSWORD') or getpass.getpass("Password: ")
+        # Validate credentials
+        validate_credentials(company_id, agency_id, user_email, password)
 
         self.driver.get(self.url)
         time.sleep(2)
@@ -99,31 +133,6 @@ class SAPCDPScraper:
 
         logging.info("✓ Login completed")
         time.sleep(3)  # Wait for any dialogs to appear
-
-        # Aggressively dismiss password manager dialogs
-        from selenium.webdriver.common.keys import Keys
-
-        # Try multiple dismissal methods
-        for attempt in range(3):
-            try:
-                # Method 1: Press Escape key multiple times
-                self.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
-                time.sleep(0.5)
-            except:
-                pass
-
-            try:
-                # Method 2: Look for and click any visible OK/Close buttons
-                ok_buttons = self.driver.find_elements(By.XPATH,
-                    "//button[contains(text(), 'OK')] | //button[contains(text(), 'Close')] | //button[@aria-label='Close']")
-                for btn in ok_buttons:
-                    if btn.is_displayed():
-                        btn.click()
-                        logging.info("Dismissed dialog by clicking button")
-                        time.sleep(1)
-                        break
-            except:
-                pass
 
         time.sleep(2)
 
